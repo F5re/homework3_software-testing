@@ -1,0 +1,96 @@
+name: Main CI + TEST
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  quality:
+    name: Main / Static + Unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - run: mvn -B checkstyle:check spotbugs:check
+      - run: mvn -B -Punit test
+
+  full_integration:
+    name: Main / Full integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - run: mvn -B -Pintegration verify
+
+  dependency_scan:
+    name: Main / Dependency scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - run: mvn -B -Psecurity verify
+
+  docker_image:
+    name: Main / Build immutable image
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - id: meta
+        shell: bash
+        run: |
+          owner="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${owner}/booking-service:${{ github.sha }}"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "IMAGE=$image" >> "$GITHUB_ENV"
+      - name: Build and push
+        run: |
+          docker build --tag "$IMAGE" .
+          docker push "$IMAGE"
+
+  main_gate:
+    name: Merge to TEST Quality Gate
+    needs: [quality, full_integration, dependency_scan, docker_image]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Exact main SHA passed blocking pre-deploy checks."
+
+  test_environment:
+    name: TEST / Deploy + API + E2E
+    needs: [main_gate, docker_image]
+    runs-on: ubuntu-latest
+    environment:
+      name: test
+      deployment: true
+    concurrency:
+      group: shared-test-environment
+      queue: max
+    env:
+      IMAGE: ${{ needs.docker_image.outputs.image }}
+      TEST_BASE_URL: ${{ vars.TEST_BASE_URL }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
