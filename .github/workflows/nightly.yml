@@ -1,0 +1,95 @@
+name: Nightly Regression
+
+on:
+  schedule:
+    - cron: "0 1 * * *"
+    - cron: "0 2 * * 0"
+  workflow_dispatch:
+    inputs:
+      run_load:
+        description: Run 45-minute load suite
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  postgres_compatibility:
+    name: Nightly / PostgreSQL ${{ matrix.postgres }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["14", "16"]
+    env:
+      TEST_POSTGRES_VERSION: ${{ matrix.postgres }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - run: mvn -B -Pintegration verify
+
+  dependency_scan:
+    name: Nightly / Dependency scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - run: mvn -B -Psecurity verify
+
+  shared_test_regression:
+    name: Nightly / TEST API + all E2E
+    runs-on: ubuntu-latest
+    concurrency:
+      group: shared-test-environment
+      queue: max
+    environment:
+      name: test
+      deployment: false
+    env:
+      TEST_BASE_URL: ${{ vars.TEST_BASE_URL }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - run: ./ci/reset-test-data.sh
+      - run: mvn -B -Papi -DbaseUrl="$TEST_BASE_URL" verify
+      - run: mvn -B -Pe2e -Dgroups=e2e-stable -DbaseUrl="$TEST_BASE_URL" verify
+      - name: Quarantine with one diagnostic retry
+        shell: bash
+        run: |
+          set +e
+          mvn -B -Pe2e -Dgroups=e2e-quarantine -DbaseUrl="$TEST_BASE_URL" verify
+          first_rc=$?
+          if [[ "$first_rc" -ne 0 ]]; then
+            mvn -B -Pe2e -Dgroups=e2e-quarantine -DbaseUrl="$TEST_BASE_URL" verify
+            retry_rc=$?
+            echo "::warning::Quarantine first_rc=$first_rc retry_rc=$retry_rc"
+          fi
+          exit 0
+
+  load:
+    name: Weekly / Load
+    if: github.event.schedule == '0 2 * * 0' || (github.event_name == 'workflow_dispatch' && inputs.run_load)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - run: mvn -B -Pload verify
